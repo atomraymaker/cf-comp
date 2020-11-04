@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+# Parameters:
+#   Domain:
+#     Type: String
+#     Description: Domain name to host application
+
+#   Branch:
+#     Type: String
+#     Description: Deployment branc
+
+Globals:
+  Function:
+    Runtime: go1.x
+
+Resources:
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      FailOnWarnings: True
+      # Auth:
+      #   Authorizers:
+      #     OAuth2:
+      #       AuthorizationScopes:
+      #         - openid
+      #       IdentitySource: $request.header.Authorization
+      DefinitionBody:
+        openapi: "3.0.1"
+        info:
+          version: "1.0"
+          title: cf-comp
+        paths:
+          /entries:
+            post:
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      type: object
+                      properties:
+                        roleArn:
+                          type: string
+                        email:
+                          type: string
+                          format: email
+              responses:
+                "200":
+                  description: entry accepted
+                "422":
+                  description: entry invalid
+                  # schema:
+                  #   type: object
+                  #   properties:
+                  #     message:
+                  #       type: string
+              x-amazon-apigateway-integration:
+                uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Submit.Arn}/invocations
+                credentials: !Sub ${SubmitInvoke.Arn}
+                passthroughBehavior: when_no_match
+                payloadFormatVersion: "2.0"
+                httpMethod: POST
+                type: aws_proxy
+
+  SubmitInvoke:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: invoke
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt Submit.Arn
+
+  Submit:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 6
+      CodeUri: submit/
+      Handler: submit
+      Environment:
+        Variables:
+          QUEUE: !Ref Submissions
+      Policies:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - sts:AssumeRole
+              Resource: "*"
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt Submissions.Arn
+
+  RunAWSets:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: run-awsets/
+      Handler: run-awsets
+      Timeout: 900
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref Scores
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt Submissions.Arn
+            BatchSize: 1 # this could be a long task, so need to process 1 at a time
+      Policies:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - sts:AssumeRole
+              Resource: "*"
+
+  Submissions:
+    Type: AWS::SQS::Queue
+
+  Scores:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: "N"
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+  # AmplifyApp:
+  #   Type: AWS::Amplify::App
+  #   Properties:
+  #     Name: atomraymaker
+  #     CustomRules:
+  #       - Source: /<*>
+  #         Target: /not_found.html
+  #         Status: "404"
+  # AmplifyBranch:
+  #   Type: AWS::Amplify::Branch
+  #   Properties:
+  #     BranchName:
+  #       Ref: Branch
+  #     AppId:
+  #       Fn::GetAtt: AmplifyApp.AppId
+  #     EnableAutoBuild: true
+  # AmplifyDomain:
+  #   Type: AWS::Amplify::Domain
+  #   Properties:
+  #     DomainName:
+  #       Ref: Domain
+  #     AppId:
+  #       Fn::GetAtt: AmplifyApp.AppId
+  #     SubDomainSettings:
+  #       - BranchName:
+  #           Fn::GetAtt: AmplifyBranch.BranchName
+  #         Prefix: ""
+  #       - BranchName:
+  #           Fn::GetAtt: AmplifyBranch.BranchName
+  #         Prefix: www
