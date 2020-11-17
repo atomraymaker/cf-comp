@@ -114,6 +114,7 @@ Resources:
       CodeUri: run-awsets/
       Handler: run-awsets
       Timeout: 900
+      MemorySize: 512
       Environment:
         Variables:
           TABLE_NAME: !Ref Scores
@@ -131,9 +132,42 @@ Resources:
               Action:
                 - sts:AssumeRole
               Resource: "*"
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+              Resource: !GetAtt Scores.Arn
+
+  Aggregate:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: aggregate/
+      Handler: aggregate
+      Timeout: 900
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref Scores
+      Events:
+        Aggregate:
+          Type: DynamoDB
+          Properties:
+            StartingPosition: TRIM_HORIZON
+            Stream: !GetAtt Scores.StreamArn
+      Policies:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+              Resource: !GetAtt Scores.Arn
 
   Submissions:
     Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 5400
 
   Scores:
     Type: AWS::DynamoDB::Table
@@ -142,13 +176,15 @@ Resources:
         - AttributeName: pk
           AttributeType: S
         - AttributeName: sk
-          AttributeType: "N"
+          AttributeType: "S"
       KeySchema:
         - AttributeName: pk
           KeyType: HASH
         - AttributeName: sk
           KeyType: RANGE
       BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
   # AmplifyApp:
   #   Type: AWS::Amplify::App
   #   Properties:

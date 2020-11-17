@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -15,6 +16,7 @@ import (
 	ddbTypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/trek10inc/awsets"
+	"github.com/trek10inc/awsets/option"
 	"github.com/trek10inc/awsets/resource"
 )
 
@@ -42,7 +44,7 @@ func handler(sqsEvent events.SQSEvent) error {
 		return fmt.Errorf("failed config.LoadDefaultConfig: %w", err)
 	}
 
-	clientConfig, clientAccount, err1 := getClientSession(localConfig, entry.Role)
+	clientConfig, err1 := getClientSession(localConfig, entry.Role)
 	if err1 != nil {
 		return fmt.Errorf("failed getClientSession: %w", err1)
 	}
@@ -53,12 +55,17 @@ func handler(sqsEvent events.SQSEvent) error {
 	}
 
 	inCF, total := calcScores(resources)
-	saveResults(localConfig, entry, clientAccount, inCF, total)
+	clientAccount := strings.Split(entry.Role, ":")[4]
+	err3 := saveResults(localConfig, entry, clientAccount, inCF, total)
+
+	if err3 != nil {
+		return fmt.Errorf("failed saveResults: %w", err3)
+	}
 
 	return nil
 }
 
-func saveResults(localConfig aws.Config, entry entry, clientAccount string, inCF int, total int) {
+func saveResults(localConfig aws.Config, entry entry, clientAccount string, inCF int, total int) error {
 	ddb := dynamodb.NewFromConfig(localConfig)
 
 	input := &dynamodb.PutItemInput{
@@ -82,7 +89,8 @@ func saveResults(localConfig aws.Config, entry entry, clientAccount string, inCF
 		},
 	}
 
-	ddb.PutItem(context.Background(), input)
+	_, err := ddb.PutItem(context.Background(), input)
+	return err
 }
 
 func calcScores(resources *resource.Group) (int, int) {
@@ -110,10 +118,29 @@ func runAwsets(clientConfig aws.Config, entry entry) (*resource.Group, error) {
 	if err != nil {
 		return &resource.Group{}, fmt.Errorf("failed to create awsets ctx: %w", err)
 	}
-	return awsets.List(clientConfig, regions, listers, nil)
+
+	statusChan := make(chan option.StatusUpdate)
+	go func() {
+		for {
+			select {
+			case update, more := <-statusChan:
+				if !more {
+					return
+				}
+				switch update.Type {
+				case option.StatusLogInfo:
+					fmt.Fprintf(os.Stdout, "%s - %s - %s\n", update.Region, update.Lister, update.Message)
+				case option.StatusLogError:
+					fmt.Fprintf(os.Stderr, "%s - %s - %s\n", update.Region, update.Lister, update.Message)
+				}
+			}
+		}
+	}()
+
+	return awsets.List(clientConfig, regions, listers, nil, option.WithStatus(statusChan))
 }
 
-func getClientSession(localConfig aws.Config, role string) (aws.Config, string, error) {
+func getClientSession(localConfig aws.Config, role string) (aws.Config, error) {
 	clientConfig := localConfig.Copy()
 	stss := sts.NewFromConfig(localConfig)
 
@@ -123,20 +150,14 @@ func getClientSession(localConfig aws.Config, role string) (aws.Config, string, 
 	})
 
 	if err1 != nil {
-		return aws.Config{}, "", fmt.Errorf("failed stss.AssumeRole: %w", err1)
+		return aws.Config{}, fmt.Errorf("failed stss.AssumeRole: %w", err1)
 	}
 
 	c := assumeOutput.Credentials
 	creds := credentials.NewStaticCredentialsProvider(*c.AccessKeyId, *c.SecretAccessKey, *c.SessionToken)
 	clientConfig.Credentials = creds
 
-	clientAccount, err2 := stss.GetCallerIdentity(context.Background(), &sts.GetCallerIdentityInput{})
-
-	if err2 != nil {
-		return aws.Config{}, "", fmt.Errorf("failed stss.AssumeRole: %w", err2)
-	}
-
-	return clientConfig, *clientAccount.Account, nil
+	return clientConfig, nil
 }
 
 func main() {
